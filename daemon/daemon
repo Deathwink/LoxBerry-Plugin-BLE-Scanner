@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+: "${LBHOMEDIR:?LBHOMEDIR must be set by LoxBerry}"
+PLUGIN_FOLDER="$(basename "$0")"
+exec "$LBHOMEDIR/bin/plugins/$PLUGIN_FOLDER/daemon_runner.sh"

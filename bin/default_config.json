@@ -1,0 +1,12 @@
+{
+  "enabled": 1,
+  "mqtt_topic": "loxberry/ble_scanner",
+  "scan_window": 10,
+  "scan_pause": 2,
+  "offline_after": 60,
+  "minimum_rssi": -100,
+  "publish_unknown": 1,
+  "mac_filter": "",
+  "name_filter": "",
+  "disabled_macs": []
+}
