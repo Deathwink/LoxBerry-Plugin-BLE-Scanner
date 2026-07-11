@@ -87,4 +87,8 @@ class GoveeDecoder:
                 "name": event.name,
                 "properties": json_value(event.event_properties),
             }
+        if not primary.model or not primary.name:
+            return None
+        if not (result["values"] or result["binary_values"] or result["events"]):
+            return None
         return result

@@ -8,5 +8,8 @@
   "publish_unknown": 1,
   "mac_filter": "",
   "name_filter": "",
-  "disabled_macs": []
+  "disabled_macs": [],
+  "mac_filter_enabled": 1,
+  "enabled_macs": [],
+  "xiaomi_bindkeys": ""
 }

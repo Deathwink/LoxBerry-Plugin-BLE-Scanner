@@ -26,6 +26,17 @@ class GoveeDecoderTests(unittest.TestCase):
         self.assertEqual(decoded["values"]["humidity"]["value"], 48.4)
         self.assertEqual(decoded["values"]["battery"]["value"], 100)
 
+    def test_does_not_claim_xiaomi_mesh_advertisement(self):
+        advertisement = SimpleNamespace(
+            manufacturer_data={},
+            service_uuids=["0000fe95-0000-1000-8000-00805f9b34fb"],
+            service_data={"0000fe95-0000-1000-8000-00805f9b34fb": bytes.fromhex("9055401001cff565319e640e00")},
+        )
+        decoded = GoveeDecoder().decode(
+            "64:9E:31:65:F5:CF", "Mesh Mi Mosq V2", -98, advertisement
+        )
+        self.assertIsNone(decoded)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,10 +12,14 @@ from pathlib import Path
 from bleak import BleakScanner
 import paho.mqtt.client as mqtt
 from govee_decoder import GoveeDecoder
+from xiaomi_decoder import XiaomiDecoder
+from oralb_decoder import OralBDecoder
 
 DEFAULTS = {"enabled": 1, "mqtt_topic": "loxberry/ble_scanner", "scan_window": 10,
             "scan_pause": 2, "offline_after": 60, "minimum_rssi": -100,
-            "publish_unknown": 1, "mac_filter": "", "name_filter": "", "disabled_macs": []}
+            "publish_unknown": 1, "mac_filter": "", "name_filter": "", "disabled_macs": [],
+            "mac_filter_enabled": 1, "enabled_macs": [],
+            "xiaomi_bindkeys": ""}
 
 def read_json(path, fallback=None):
     try:
@@ -47,7 +51,10 @@ class Bridge:
     def __init__(self, args):
         self.args, self.client, self.connected = args, None, False
         self.seen, self.stop = {}, asyncio.Event()
+        self.unpublished = set()
         self.govee = GoveeDecoder()
+        self.xiaomi = XiaomiDecoder()
+        self.oralb = OralBDecoder()
         self.config_mtime = -1
 
     def config(self):
@@ -76,6 +83,7 @@ class Bridge:
         client.publish(cfg["mqtt_topic"] + "/availability", "online", retain=True)
 
     def publish(self, cfg, address, payload):
+        self.unpublished.discard(address)
         base = f"{cfg['mqtt_topic']}/device/{safe_id(address)}"
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         self.client.publish(base + "/json", body, retain=True)
@@ -91,35 +99,59 @@ class Bridge:
                 self.client.publish(base + "/event/" + field, json.dumps(item), retain=False)
         self.client.publish(cfg["mqtt_topic"] + "/events", body, retain=False)
 
+    def unpublish(self, cfg, address, payload):
+        if address in self.unpublished:
+            self.seen.pop(address, None)
+            return
+        base = f"{cfg['mqtt_topic']}/device/{safe_id(address)}"
+        fields = {"json", "rssi"}
+        decoded = payload.get("decoded") if isinstance(payload, dict) else None
+        if isinstance(decoded, dict):
+            fields.update(decoded.get("values", {}).keys())
+            fields.update(decoded.get("binary_values", {}).keys())
+        for field in fields:
+            self.client.publish(base + "/" + field, "", retain=True)
+        self.client.publish(base + "/presence", "0", retain=True)
+        self.seen.pop(address, None)
+        self.unpublished.add(address)
+
     async def cycle(self, cfg):
         devices = await BleakScanner.discover(timeout=max(1, float(cfg["scan_window"])), return_adv=True)
-        now = int(time.time()); macs = [x.strip().upper() for x in str(cfg["mac_filter"]).split(",") if x.strip()]
-        disabled = {str(x).strip().upper() for x in cfg.get("disabled_macs", []) if str(x).strip()}
+        now = int(time.time())
+        enabled_macs = {str(x).strip().upper() for x in cfg.get("enabled_macs", []) if str(x).strip()}
+        use_mac_filter = bool(cfg.get("mac_filter_enabled", 1))
         name_re = re.compile(str(cfg["name_filter"]), re.I) if str(cfg["name_filter"]).strip() else None
         known = read_json(self.args.devices)
         for _, (device, adv) in devices.items():
             address, name = device.address.upper(), adv.local_name or device.name or ""
-            known[address] = {"address": address, "name": name, "rssi": adv.rssi, "last_seen": now}
-            if address in disabled:
-                base = f"{cfg['mqtt_topic']}/device/{safe_id(address)}"
-                for field in ("json", "rssi", "temperature", "humidity", "battery"):
-                    self.client.publish(base + "/" + field, "", retain=True)
-                self.client.publish(base + "/presence", "0", retain=True)
-                self.seen.pop(address, None)
-                continue
-            if adv.rssi < int(cfg["minimum_rssi"]): continue
-            if macs and address not in macs: continue
-            if name_re and not name_re.search(name): continue
-            if not cfg["publish_unknown"] and not name: continue
             payload = {"address": address, "name": name, "rssi": adv.rssi, "tx_power": adv.tx_power,
                        "service_uuids": list(adv.service_uuids), "manufacturer_data": hex_map(adv.manufacturer_data),
                        "service_data": hex_map(adv.service_data), "present": True, "last_seen": now}
-            decoded = self.govee.decode(address, name, adv.rssi, adv)
+            decoded = None
+            try:
+                decoded = self.govee.decode(address, name, adv.rssi, adv)
+                if decoded is None:
+                    decoded = self.xiaomi.decode(address, name, adv.rssi, adv, cfg.get("xiaomi_bindkeys", ""))
+                if decoded is None:
+                    decoded = self.oralb.decode(address, name, adv.rssi, adv)
+            except Exception:
+                logging.exception("Payload decoder failed for %s (%s)", address, name)
             if decoded is not None:
                 payload["decoded"] = decoded
+            known[address] = {"address": address, "name": name, "rssi": adv.rssi,
+                              "last_seen": now, "json": payload}
+            if use_mac_filter and address not in enabled_macs:
+                self.unpublish(cfg, address, payload); continue
+            if adv.rssi < int(cfg["minimum_rssi"]): continue
+            if name_re and not name_re.search(name): continue
+            if not cfg["publish_unknown"] and not name: continue
             self.seen[address] = now; self.publish(cfg, address, payload)
         if len(known) > 500:
             known = dict(sorted(known.items(), key=lambda item: item[1].get("last_seen", 0), reverse=True)[:500])
+        if use_mac_filter:
+            for address, cached in known.items():
+                if address not in enabled_macs:
+                    self.unpublish(cfg, address, cached.get("json", {}))
         write_json(self.args.devices, known)
         offline_after = max(5, int(cfg["offline_after"]))
         for address, last_seen in list(self.seen.items()):
